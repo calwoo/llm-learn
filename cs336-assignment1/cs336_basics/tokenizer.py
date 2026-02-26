@@ -2,6 +2,7 @@ from typing import TypeAlias
 import regex as re
 
 WordFreqs: TypeAlias = dict[tuple[bytes, ...], int]
+Vocab: TypeAlias = dict[int, bytes]
 
 
 def pretokenize(text: str, special_tokens: list[str]) -> WordFreqs:
@@ -51,3 +52,39 @@ def apply_merge(word_freqs: WordFreqs, pair_to_merge: tuple[bytes, bytes]) -> Wo
         new_word_freqs[new_word] = freq
 
     return new_word_freqs
+
+
+def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]) -> tuple[Vocab, list[tuple[bytes, bytes]]]:
+    # initial vocab with individual bytes + special tokens
+    vocab: Vocab = {i: bytes([i]) for i in range(256)}
+    for tok in special_tokens:
+        vocab[len(vocab)] = tok.encode("utf-8")
+
+    # read text and pretokenize
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    word_freqs: WordFreqs = pretokenize(text, special_tokens)
+
+    # run BPE merging
+    merges = []
+    while len(vocab) < vocab_size:
+        pair_counts = {}
+        for word, freq in word_freqs.items():
+            for wtoken_A, wtoken_B in zip(word, word[1:]):
+                pair = (wtoken_A, wtoken_B)
+                pair_counts[pair] = pair_counts.get(pair, 0) + freq
+
+        if len(pair_counts) == 0:
+            break
+
+        # get the highest count and merge
+        pair_to_merge = max(pair_counts, key=pair_counts.get)
+        word_freqs = apply_merge(word_freqs, pair_to_merge)
+
+        # update vocab
+        wtoken_A, wtoken_B = pair_to_merge
+        new_token = wtoken_A + wtoken_B
+        vocab[len(vocab)] = new_token
+        merges.append(pair_to_merge)
+
+    return vocab, merges

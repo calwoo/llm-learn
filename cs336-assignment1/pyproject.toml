@@ -45,8 +45,17 @@ line-length = 120
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
 
+[dependency-groups]
+dev = [
+    "pyrefly>=0.54.0",
+]
+
 [tool.ruff.lint]
 extend-select = ["UP"]
 ignore = [
     "F722"
 ]
+
+[tool.pyrefly]
+source-path = ["cs336_basics"]
+python-version = "3.11"
