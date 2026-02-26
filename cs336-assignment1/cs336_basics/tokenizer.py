@@ -115,34 +115,28 @@ class Tokenizer:
     ) -> "Tokenizer": ...
 
     def encode(self, text: str) -> list[int]:
-        # there should always be some special tokens, such as <|endoftext|>
-        chunks = [text]
+        return list(self.encode_iterable([text]))
 
-        if self.special_tokens is not None:
-            special_split_pattern = "|".join(map(re.escape, self.special_tokens))
-            chunks: list[str] = re.split(rf"({special_split_pattern})", text)
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            chunks = [text]
 
-        token_seq = []
-        for chunk in chunks:
-            if self.special_tokens and chunk in self.special_tokens:
-                token_idx = self.inverse_vocab[chunk.encode("utf-8")]
-                token_seq.append(token_idx)
-                continue
+            if self.special_tokens is not None:
+                special_split_pattern = "|".join(map(re.escape, self.special_tokens))
+                chunks = re.split(rf"({special_split_pattern})", text)
 
-            # if not special token, pretokenize
-            for match in re.finditer(PAT, chunk):
-                match_grp = match.group()
-                match_byteseq = match_grp.encode("utf-8")
-                match_tokens = tuple(bytes([b]) for b in match_byteseq)
+            for chunk in chunks:
+                if self.special_tokens and chunk in self.special_tokens:
+                    yield self.inverse_vocab[chunk.encode("utf-8")]
+                    continue
 
-                merged_tokens = self._apply_merges(list(match_tokens))
-                # get idx
-                merged_token_seq = [self.inverse_vocab[tok] for tok in merged_tokens]
-                token_seq.extend(merged_token_seq)
-
-        return token_seq
-
-    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]: ...
+                # if not special token, pretokenize and apply merges
+                for match in re.finditer(PAT, chunk):
+                    match_byteseq = match.group().encode("utf-8")
+                    match_tokens = tuple(bytes([b]) for b in match_byteseq)
+                    merged_tokens = self._apply_merges(list(match_tokens))
+                    for tok in merged_tokens:
+                        yield self.inverse_vocab[tok]
 
     def decode(self, ids: list[int]) -> str:
         decoded_bytes = [self.vocab[idx] for idx in ids]
