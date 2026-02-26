@@ -1,4 +1,4 @@
-from typing import Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from typing import TypeAlias
 import regex as re
 import os
