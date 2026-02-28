@@ -1,3 +1,4 @@
+from typing import Iterable
 from typing import Callable
 from jaxtyping import Int, Float
 import torch
@@ -47,3 +48,35 @@ class AdamW(torch.optim.Optimizer):
                 p.data -= lr_t * state["m"] / (torch.sqrt(state["v"]) + group["eps"])
                 # apply weight decay
                 p.data -= group["lr"] * group["weight_decay"] * p.data
+
+
+def lr_cosine_schedule(
+    it: int,
+    max_learning_rate: float,
+    min_learning_rate: float,
+    warmup_iters: int,
+    cosine_cycle_iters: int,
+) -> float:
+    if it < warmup_iters:
+        return it / float(warmup_iters) * max_learning_rate
+
+    if it < cosine_cycle_iters:
+        cosine = math.cos(math.pi * (it - warmup_iters) / float(cosine_cycle_iters - warmup_iters))
+        return min_learning_rate + 0.5 * (1 + cosine) * (max_learning_rate - min_learning_rate)
+
+    return min_learning_rate
+
+
+def gradient_clip(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+    params = list(parameters)
+    # compute combined L2 norm across all parameters
+    grad_norms_sq = [torch.sum(p.grad.data**2) for p in params if p.grad is not None]
+    if not grad_norms_sq:
+        return
+    total_norm = torch.sqrt(torch.stack(grad_norms_sq).sum())
+    # scale all gradients uniformly if combined norm exceeds limit
+    if total_norm > max_l2_norm:
+        scale = max_l2_norm / total_norm
+        for p in params:
+            if p.grad is not None:
+                p.grad.data *= scale
