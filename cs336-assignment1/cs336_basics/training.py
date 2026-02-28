@@ -1,6 +1,8 @@
-from typing import Iterable
-from typing import Callable
+from typing import IO, BinaryIO, Iterable, Callable
 from jaxtyping import Int, Float
+import numpy as np
+import numpy.typing as npt
+import os
 import torch
 import math
 
@@ -80,3 +82,41 @@ def gradient_clip(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) 
         for p in params:
             if p.grad is not None:
                 p.grad.data *= scale
+
+
+def get_batch(
+    dataset: npt.NDArray,
+    batch_size: int,
+    context_length: int,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # sample random start positions: valid range is [0, len - context_length)
+    # each example needs context_length tokens for x plus one more for y
+    start_indices = np.random.randint(0, len(dataset) - context_length, size=batch_size)
+    # build index arrays via broadcasting: (batch_size, context_length)
+    offsets = np.arange(context_length)
+    x_indices = start_indices[:, None] + offsets  # (batch, context_length)
+    y_indices = start_indices[:, None] + offsets + 1  # (batch, context_length), shifted by 1
+    x = torch.tensor(dataset[x_indices], dtype=torch.long, device=device)
+    y = torch.tensor(dataset[y_indices], dtype=torch.long, device=device)
+    return x, y
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | BinaryIO | IO[bytes],
+) -> None:
+    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "iteration": iteration}, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | BinaryIO | IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    checkpoint = torch.load(src, weights_only=False)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["iteration"]
