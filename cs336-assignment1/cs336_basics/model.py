@@ -1,3 +1,6 @@
+from jaxtyping import Int
+from jaxtyping import Bool
+from jaxtyping import Float
 import math
 import torch
 import torch.nn as nn
@@ -113,4 +116,82 @@ class RoPE(nn.Module):
         # [x0, x1, x2, x3, x4, x5] -> [-x1, x0, -x3, x2, -x5, x4]
         # by row-major, [[-x1, x0], [-x3, x2], [-x5, x4]].flatten() gives it
         out = torch.stack([-x_odd, x_even], dim=-1).flatten(-2)
+        return out
+
+
+def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
+    x_max = torch.max(x, dim=i, keepdim=True)[0]
+    vals = torch.exp(x - x_max)
+    out = vals / vals.sum(dim=i, keepdim=True)
+    return out
+
+
+def scaled_dot_product_attention(
+    Q: Float[torch.Tensor, " ... queries d_k"],
+    K: Float[torch.Tensor, " ... keys d_k"],
+    V: Float[torch.Tensor, " ... keys d_v"],
+    mask: Bool[torch.Tensor, " ... queries keys"] | None = None,
+) -> Float[torch.Tensor, " ... queries d_v"]:
+    d_k = Q.size(-1)
+    scale = math.sqrt(d_k)
+    qk_vals = einsum(Q, K, "... q d_k, ... k d_k-> ... q k") / scale
+    if mask is not None:
+        qk_vals = qk_vals.masked_fill(~mask, float("-inf"))
+    softmax_scores = softmax(qk_vals, -1)
+    out = einsum(softmax_scores, V, "... q k, ... k d_v-> ... q d_v")
+    return out
+
+
+class CausalMultiHeadSelfAttention(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        max_seq_len: int | None = None,
+        theta: float | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super(CausalMultiHeadSelfAttention, self).__init__()
+        self.d_kv = d_model // num_heads
+        self.d_model = d_model
+        self.num_heads = num_heads
+        # weights
+        self.w_q = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.w_k = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.w_v = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.w_o = Linear(d_model, d_model, device=device, dtype=dtype)
+        # positional embeddings
+        self.rope = None
+        if theta is not None and max_seq_len is not None:
+            self.rope = RoPE(theta=theta, d_k=self.d_kv, max_seq_len=max_seq_len, device=device)
+
+    def forward(
+        self,
+        x: Float[torch.Tensor, " ... seq_len d_model"],
+        token_positions: Int[torch.Tensor, " ... sequence_length"] | None = None,
+    ) -> Float[torch.Tensor, " ... seq_len d_model"]:
+        seq_len = x.size(-2)
+        # linear projections
+        q_full = self.w_q.forward(x)
+        k_full = self.w_k.forward(x)
+        v_full = self.w_v.forward(x)
+        # split into multiple heads
+        q_heads = q_full.reshape(-1, self.num_heads, self.d_kv).transpose(-3, -2)
+        k_heads = k_full.reshape(-1, self.num_heads, self.d_kv).transpose(-3, -2)
+        v_heads = v_full.reshape(-1, self.num_heads, self.d_kv).transpose(-3, -2)
+
+        if self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(seq_len, device=x.device)
+
+            q_heads = self.rope.forward(q_heads, token_positions)
+            k_heads = self.rope.forward(k_heads, token_positions)
+
+        # causal masking and attention
+        causal_mask = ~torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
+        attn_out = scaled_dot_product_attention(q_heads, k_heads, v_heads, mask=causal_mask)
+
+        attn_out_combined = attn_out.transpose(-3, -2).reshape(-1, self.d_model)
+        out = self.w_o.forward(attn_out_combined)
         return out
