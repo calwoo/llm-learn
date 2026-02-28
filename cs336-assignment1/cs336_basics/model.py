@@ -4,7 +4,7 @@ from jaxtyping import Float
 import math
 import torch
 import torch.nn as nn
-from einops import einsum
+from einops import einsum, rearrange
 
 
 class Linear(nn.Module):
@@ -44,7 +44,7 @@ class RMSNorm(nn.Module):
         self, d_model: int, eps: float = 1e-5, device: torch.device | None = None, dtype: torch.dtype | None = None
     ):
         super(RMSNorm, self).__init__()
-        self.gain = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+        self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
         self.d_model = d_model
         self.eps = eps
 
@@ -54,7 +54,7 @@ class RMSNorm(nn.Module):
         x = x.to(torch.float32)
 
         rms_norm = torch.sqrt((1 / self.d_model) * einsum(x**2, "... d_model -> ...").unsqueeze(-1) + self.eps)
-        result = x * self.gain / rms_norm
+        result = x * self.weight / rms_norm
 
         return result.to(in_dtype)
 
@@ -157,10 +157,10 @@ class CausalMultiHeadSelfAttention(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         # weights
-        self.w_q = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.w_k = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.w_v = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.w_o = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         # positional embeddings
         self.rope = None
         if theta is not None and max_seq_len is not None:
@@ -173,13 +173,13 @@ class CausalMultiHeadSelfAttention(nn.Module):
     ) -> Float[torch.Tensor, " ... seq_len d_model"]:
         seq_len = x.size(-2)
         # linear projections
-        q_full = self.w_q.forward(x)
-        k_full = self.w_k.forward(x)
-        v_full = self.w_v.forward(x)
+        q_full = self.q_proj.forward(x)
+        k_full = self.k_proj.forward(x)
+        v_full = self.v_proj.forward(x)
         # split into multiple heads
-        q_heads = q_full.reshape(-1, self.num_heads, self.d_kv).transpose(-3, -2)
-        k_heads = k_full.reshape(-1, self.num_heads, self.d_kv).transpose(-3, -2)
-        v_heads = v_full.reshape(-1, self.num_heads, self.d_kv).transpose(-3, -2)
+        q_heads = rearrange(q_full, "... seq_len (n_h d_kv) -> ... n_h seq_len d_kv", n_h=self.num_heads)
+        k_heads = rearrange(k_full, "... seq_len (n_h d_kv) -> ... n_h seq_len d_kv", n_h=self.num_heads)
+        v_heads = rearrange(v_full, "... seq_len (n_h d_kv) -> ... n_h seq_len d_kv", n_h=self.num_heads)
 
         if self.rope is not None:
             if token_positions is None:
@@ -192,6 +192,74 @@ class CausalMultiHeadSelfAttention(nn.Module):
         causal_mask = ~torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
         attn_out = scaled_dot_product_attention(q_heads, k_heads, v_heads, mask=causal_mask)
 
-        attn_out_combined = attn_out.transpose(-3, -2).reshape(-1, self.d_model)
-        out = self.w_o.forward(attn_out_combined)
+        attn_out_combined = rearrange(attn_out, "... n_h seq_len d_kv -> ... seq_len (n_h d_kv)")
+        out = self.output_proj.forward(attn_out_combined)
+        return out
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super(TransformerBlock, self).__init__()
+        self.ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.attn = CausalMultiHeadSelfAttention(
+            d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, theta=theta, device=device, dtype=dtype
+        )
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, device=device, dtype=dtype)
+
+    def forward(
+        self, x: Float[torch.Tensor, " batch seq_length d_model"]
+    ) -> Float[torch.Tensor, " batch seq_length d_model"]:
+        y = x + self.attn.forward(self.ln1.forward(x))
+        out = y + self.ffn.forward(self.ln2.forward(y))
+        return out
+
+
+class TransformerLM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super(TransformerLM, self).__init__()
+        self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    d_ff=d_ff,
+                    max_seq_len=context_length,
+                    theta=rope_theta,
+                    device=device,
+                    dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.lm_head = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
+
+    def forward(self, x: Int[torch.Tensor, " batch seq_length"]) -> Float[torch.Tensor, " batch seq_length vocab_size"]:
+        embs = self.token_embeddings.forward(x)
+        for block in self.layers:
+            embs = block.forward(embs)
+        embs = self.ln_final.forward(embs)
+        out = self.lm_head.forward(embs)
         return out

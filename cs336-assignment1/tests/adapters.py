@@ -10,10 +10,20 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.tokenizer import train_bpe, Tokenizer
-from cs336_basics.model import Linear, Embedding, RMSNorm
-from cs336_basics.model import SwiGLU
-from cs336_basics.model import RoPE, CausalMultiHeadSelfAttention
-from cs336_basics.model import softmax, scaled_dot_product_attention
+from cs336_basics.model import (
+    Linear,
+    Embedding,
+    RMSNorm,
+    silu,
+    SwiGLU,
+    RoPE,
+    CausalMultiHeadSelfAttention,
+    softmax,
+    scaled_dot_product_attention,
+    TransformerBlock,
+    TransformerLM,
+)
+from cs336_basics.training import cross_entropy, AdamW
 
 
 def run_linear(
@@ -157,10 +167,10 @@ def run_multihead_self_attention(
     mha = CausalMultiHeadSelfAttention(d_model=d_model, num_heads=num_heads)
     mha.load_state_dict(
         {
-            "w_q.weight": q_proj_weight,
-            "w_k.weight": k_proj_weight,
-            "w_v.weight": v_proj_weight,
-            "w_o.weight": o_proj_weight,
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "output_proj.weight": o_proj_weight,
         }
     )
     return mha.forward(in_features)
@@ -207,10 +217,10 @@ def run_multihead_self_attention_with_rope(
     mha = CausalMultiHeadSelfAttention(d_model=d_model, num_heads=num_heads, theta=theta, max_seq_len=max_seq_len)
     mha.load_state_dict(
         {
-            "w_q.weight": q_proj_weight,
-            "w_k.weight": k_proj_weight,
-            "w_v.weight": v_proj_weight,
-            "w_o.weight": o_proj_weight,
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "output_proj.weight": o_proj_weight,
         }
     )
     return mha.forward(in_features, token_positions)
@@ -310,7 +320,16 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+
+    block = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        max_seq_len=max_seq_len,
+        theta=theta,
+    )
+    block.load_state_dict(weights)
+    return block.forward(in_features)
 
 
 def run_transformer_lm(
@@ -392,7 +411,18 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+
+    transformer = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta,
+    )
+    transformer.load_state_dict(weights)
+    return transformer.forward(in_indices)
 
 
 def run_rmsnorm(
@@ -417,7 +447,7 @@ def run_rmsnorm(
     """
 
     layer = RMSNorm(d_model=d_model, eps=eps)
-    layer.load_state_dict({"gain": weights})
+    layer.load_state_dict({"weight": weights})
     return layer.forward(in_features)
 
 
@@ -432,7 +462,8 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+
+    return silu(in_features)
 
 
 def run_get_batch(
@@ -490,7 +521,8 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+
+    return cross_entropy(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -509,7 +541,8 @@ def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
